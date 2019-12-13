@@ -18,11 +18,15 @@ module BTC
     POINT_CONVERSION_COMPRESSED   = 0x02
     POINT_CONVERSION_UNCOMPRESSED = 0x04
 
-    attach_function :SSL_library_init,         [], :int
-    attach_function :ERR_load_crypto_strings,  [], :void
-    attach_function :SSL_load_error_strings,   [], :void
-    attach_function :RAND_poll,                [], :int
+    begin
+      attach_function :SSL_library_init,         [], :int
+      attach_function :ERR_load_crypto_strings,  [], :void
+      attach_function :SSL_load_error_strings,   [], :void
+    rescue FFI::NotFoundError
+      @@skip_init = true
+    end
 
+    attach_function :RAND_poll,                [], :int
     attach_function :BN_CTX_free,              [:pointer],                                         :int
     attach_function :BN_CTX_new,               [],                                                 :pointer
     attach_function :BN_new,                   [],                                                 :pointer
@@ -89,6 +93,8 @@ module BTC
     end
 
     def prepare_if_needed
+      return if @@skip_init
+
       if !@prepared_openssl
         SSL_library_init()
         ERR_load_crypto_strings()
@@ -188,9 +194,12 @@ module BTC
         buf = FFI::MemoryPointer.new(:uint8, length)
         if i2d_ECPrivateKey(eckey, pointer_to_pointer(buf)) == length
           # We have a full DER representation of private key, it contains a length
-          # of a private key at offset 8 and private key at offset 9.
-          size = buf.get_array_of_uint8(8, 1)[0]
-          private_key2 = buf.get_array_of_uint8(9, size).pack("C*").rjust(32, "\x00")
+          # of a private key at offset 6 and private key at offset 7.
+          # For the reference:
+          # https://tools.ietf.org/html/rfc5915
+          # https://lapo.it/asn1js
+          size = buf.get_array_of_uint8(6, 1)[0]
+          private_key2 = buf.get_array_of_uint8(7, size).pack("C*").rjust(32, "\x00")
         else
           raise BTCError, "OpenSSL failed to convert private key to DER format"
         end
@@ -347,7 +356,7 @@ module BTC
     def ecdsa_normalized_signature(signature)
       ecdsa_reserialize_signature(signature, normalize_s: true)
     end
-    
+
     def ecdsa_reserialize_signature(signature, normalize_s: false)
       raise ArgumentError, "Signature is missing" if !signature
 
@@ -368,7 +377,7 @@ module BTC
         end
 
         sig = ECDSA_SIG.new(psig) # read sig from its pointer
-        
+
         if normalize_s
           # Enforce low S values, by negating the value (modulo the order) if above order/2.
           s = sig[:s]
@@ -401,7 +410,7 @@ module BTC
       raise ArgumentError, "Signature is missing" if !signature
       raise ArgumentError, "Hash is missing" if !hash
       raise ArgumentError, "Public key is missing" if !public_key
-      
+
       # New versions of OpenSSL will reject non-canonical DER signatures. de/re-serialize first.
       signature = ecdsa_reserialize_signature(signature, normalize_s: false)
 
